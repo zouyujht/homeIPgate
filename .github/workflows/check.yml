@@ -30,10 +30,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Get VPN Gate nodes + check via Cloudflare Worker + build page
+      - name: Check VPN Gate SSTP nodes
         run: python vpngate.py
         env:
-          # 已部署的检测 Worker (不要改动: 检测统一走这里)
+          CHECK_WORKER: ${{ secrets.DOMAIN }}
+          CHECK_CONCURRENCY: "32"
+          CHECK_TIMEOUT: "90"
+
+      - name: Check SOCKS5 nodes
+        run: python socks5.py
+        env:
           CHECK_WORKER: ${{ secrets.DOMAIN }}
           CHECK_CONCURRENCY: "32"
           CHECK_TIMEOUT: "90"
@@ -68,5 +74,6 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
       - name: Show site URL
         run: 'echo "site: https://zouyujht.github.io/homeIPgate/ ..."'

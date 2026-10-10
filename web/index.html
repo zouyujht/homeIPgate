@@ -3,28 +3,37 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>VPN Gate SSTP 节点检测</title>
+<title>代理节点检测系统 · SSTP + SOCKS5</title>
 <style>
   :root {
     --bg: #0b1120; --panel: #111a2e; --panel2: #16233c; --border: #243450;
     --text: #dbe7ff; --muted: #7f93b8; --accent: #4cc2ff; --ok: #2fd08a;
-    --res: #b48cff; --dc: #ffb84d; --unk: #8a9bb5;
+    --res: #b48cff; --dc: #ffb84d; --unk: #8a9bb5; --warn: #ff6b6b;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; min-height: 100vh; padding: 20px; }
-  .wrap { max-width: 1100px; margin: 0 auto; }
-  h1 { font-size: 22px; margin-bottom: 4px; }
-  .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
+  .tab { padding: 12px 20px; cursor: pointer; border: none; background: none; color: var(--muted); font-size: 14px; border-bottom: 2px solid transparent; transition: all 0.2s; }
+  .tab:hover { color: var(--accent); }
+  .tab.on { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-content { display: none; }
+  .tab-content.on { display: block; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
   .card .k { color: var(--muted); font-size: 12px; }
   .card .v { font-size: 24px; font-weight: 700; margin-top: 4px; }
+  .empty-state { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 40px 20px; text-align: center; color: var(--muted); }
+  .empty-state .icon { font-size: 36px; margin-bottom: 12px; }
+  .empty-state p { margin: 6px 0; }
   .bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; align-items: center; }
   .pill { background: var(--panel2); border: 1px solid var(--border); color: var(--text); border-radius: 999px; padding: 6px 14px; font-size: 13px; cursor: pointer; user-select: none; }
   .pill.on { border-color: var(--accent); color: var(--accent); }
   .legend { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
   .country { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 14px; overflow: hidden; }
-  .country .head { display: flex; justify-content: space-between; padding: 12px 16px; background: var(--panel2); font-weight: 600; cursor: pointer; flex-wrap: wrap; gap: 6px; }
+  .country .head { display: flex; justify-content: space-between; padding: 12px 16px; background: var(--panel2); font-weight: 600; cursor: pointer; flex-wrap: wrap; gap: 6px; align-items: center; }
   .country .head .tag { font-size: 12px; color: var(--muted); font-weight: 400; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { padding: 9px 12px; text-align: left; border-top: 1px solid var(--border); }
@@ -37,64 +46,93 @@
   .lat { color: var(--ok); }
   code { background: var(--panel2); padding: 2px 6px; border-radius: 5px; font-size: 12px; cursor: pointer; }
   code:hover { outline: 1px solid var(--accent); }
-  .empty { color: var(--muted); padding: 30px; text-align: center; }
-  .footer { color: var(--muted); font-size: 12px; margin-top: 20px; text-align: center; }
+  .footer { color: var(--muted); font-size: 12px; margin-top: 30px; text-align: center; border-top: 1px solid var(--border); padding-top: 20px; }
   @media (max-width: 700px) { th, td { padding: 7px 8px; } .hide-m { display: none; } }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>VPN Gate · SSTP 节点检测</h1>
-  <div class="sub">节点来自 VPN Gate（仅 TCP 入口中继），检测由 Cloudflare Worker 执行，GitHub Actions 定时刷新</div>
+  <h1>🌐 代理节点检测系统</h1>
+  <div class="sub">SSTP 节点来自 VPN Gate（TCP 入口）| SOCKS5 节点来自公开订阅 | 检测由 Cloudflare Worker 执行 | GitHub Actions 定时刷新</div>
 
-  <div class="cards" id="cards"></div>
-
-  <div class="bar">
-    <span class="pill on" data-f="all">全部</span>
-    <span class="pill" data-f="residential">住宅 IP</span>
-    <span class="pill" data-f="datacenter">数据中心</span>
-    <span class="pill" data-f="unknown">未识别</span>
+  <!-- 标签页 -->
+  <div class="tabs">
+    <button class="tab on" data-tab="sstp">SSTP 节点</button>
+    <button class="tab" data-tab="socks5">SOCKS5 节点</button>
   </div>
-  <div class="legend">「住宅 / 数据中心」为基于中继注册类型与出口运营商的估算，非严格判定。</div>
 
-  <div id="countries"></div>
+  <!-- SSTP 标签页 -->
+  <div class="tab-content on" id="tab-sstp">
+    <div class="cards" id="cards-sstp"></div>
+    <div class="bar">
+      <span class="pill on" data-f="sstp-all">全部</span>
+      <span class="pill" data-f="sstp-residential">住宅 IP</span>
+      <span class="pill" data-f="sstp-datacenter">数据中心</span>
+      <span class="pill" data-f="sstp-unknown">未识别</span>
+    </div>
+    <div class="legend">「住宅 / 数据中心」为基于中继注册类型与出口运营商的估算。点击 host:port 复制 sstp://vpn:vpn@host:port</div>
+    <div id="countries-sstp"></div>
+  </div>
+
+  <!-- SOCKS5 标签页 -->
+  <div class="tab-content" id="tab-socks5">
+    <div class="cards" id="cards-socks5"></div>
+    <div class="bar">
+      <span class="pill on" data-f="socks5-all">全部</span>
+      <span class="pill" data-f="socks5-residential">住宅 IP</span>
+      <span class="pill" data-f="socks5-datacenter">数据中心</span>
+      <span class="pill" data-f="socks5-unknown">未识别</span>
+    </div>
+    <div class="legend">点击 host:port 复制 socks5://host:port</div>
+    <div id="countries-socks5"></div>
+  </div>
 
   <div class="footer" id="foot">加载中…</div>
 </div>
 
 <script>
-let DATA = null, FILTER = "all";
+let DATA_SSTP = null, DATA_SOCKS5 = null;
+let FILTER_SSTP = "all", FILTER_SOCKS5 = "all";
 
 function copyLink(text) {
   if (navigator.clipboard) navigator.clipboard.writeText(text);
 }
 
-function renderCards(d) {
+function renderCards(d, protocol) {
   const s = d.stats || {};
-  const items = [
-    ["最后更新", d.generated_at || "-", "时区 UTC"],
-    ["SSTP 节点", s.sstp_nodes, "筛选自 VPN Gate"],
-    ["已检测", s.checked, "提交给 Worker"],
-    ["可用节点", s.success, "success = true"],
-    ["国家数量", s.countries, "按可用节点统计"],
-    ["住宅(估算)", s.residential_est, "数据中心 " + (s.datacenter_est || 0)]
+  const target = protocol === "sstp" ? "#cards-sstp" : "#cards-socks5";
+  const items = protocol === "sstp" ? [
+    ["最后更新", d.generated_at || "-", "UTC"],
+    [protocol.toUpperCase() + " 节点", s.sstp_nodes || "0", "筛选自 VPN Gate"],
+    ["已检测", s.checked || "0", "提交给 Worker"],
+    ["可用节点", s.success || "0", "success = true"],
+    ["国家数量", s.countries || "0", "按可用节点统计"],
+    ["住宅(估算)", s.residential || "0", "数据中心 " + (s.datacenter || "0")]
+  ] : [
+    ["最后更新", d.generated_at || "-", "UTC"],
+    ["原始节点", s.raw_nodes || "0", "从订阅源获取"],
+    ["已检测", s.checked || "0", "提交给 Worker"],
+    ["可用节点", s.success || "0", "success = true"],
+    ["国家数量", s.countries || "0", "按可用节点统计"],
+    ["住宅(估算)", s.residential || "0", "数据中心 " + (s.datacenter || "0")]
   ];
-  document.getElementById("cards").innerHTML = items.map(function (x) {
+  document.querySelector(target).innerHTML = items.map(function (x) {
     return '<div class="card"><div class="k">' + x[0] + '</div><div class="v">' + x[1] + '</div><div class="k">' + x[2] + '</div></div>';
   }).join("");
 }
 
-function rowHtml(n) {
+function rowHtml(n, protocol) {
   let badge;
   if (n.residential === "residential") badge = '<span class="badge b-res">住宅</span>';
   else if (n.residential === "datacenter") badge = '<span class="badge b-dc">机房</span>';
   else badge = '<span class="badge b-unk">未知</span>';
-  const exit = n.exit ? ((n.exit.ip || "?") + " · " + (n.exit.org || n.exit.country || "")) : "-";
+  const exit = n.exit ? ((n.exit.ip || "?") + " · " + (n.exit.country || "")) : "-";
   const date = (n.checked_at || "").split(" ")[0];
+  const link = protocol === "sstp" ? ("sstp://vpn:vpn@" + n.host + ":" + n.port) : ("socks5://" + n.host + ":" + n.port);
   return '<tr>' +
-    '<td><code title="点击复制 sstp 链接">' + n.host + ':' + n.port + '</code></td>' +
+    '<td><code title="点击复制链接" data-copy="' + link + '">' + n.host + ':' + n.port + '</code></td>' +
     '<td class="hide-m">' + (n.country_code || "") + '</td>' +
-    '<td>SSTP</td>' +
+    '<td>' + protocol.toUpperCase() + '</td>' +
     '<td class="lat">' + (n.latency_ms != null ? n.latency_ms + ' ms' : '-') + '</td>' +
     '<td class="hide-m" style="color:var(--muted)">' + exit + '</td>' +
     '<td>' + badge + '</td>' +
@@ -102,18 +140,21 @@ function rowHtml(n) {
     '</tr>';
 }
 
-function renderCountries() {
-  const box = document.getElementById("countries");
-  const entries = Object.entries(DATA.countries || {})
+function renderCountries(protocol, filter) {
+  const data = protocol === "sstp" ? DATA_SSTP : DATA_SOCKS5;
+  if (!data) return;
+  
+  const box = document.getElementById("countries-" + protocol);
+  const entries = Object.entries(data.countries || {})
     .map(function (x) {
-      const nodes = x[1].nodes.filter(function (n) { return FILTER === "all" || n.residential === FILTER; });
+      const nodes = x[1].nodes.filter(function (n) { return filter === "all" || n.residential === filter; });
       return [x[0], Object.assign({}, x[1], { nodes: nodes, count: nodes.length })];
     })
     .filter(function (x) { return x[1].nodes.length > 0; })
     .sort(function (a, b) { return b[1].count - a[1].count; });
 
   if (!entries.length) {
-    box.innerHTML = '<div class="country"><div class="empty">没有符合当前筛选的可用节点（本轮 Worker 判定全部不可用或无数据）</div></div>';
+    box.innerHTML = '<div class="empty-state"><div class="icon">📭</div><p>没有符合当前筛选的可用节点</p></div>';
     return;
   }
   box.innerHTML = entries.map(function (x) {
@@ -124,44 +165,95 @@ function renderCountries() {
         '<span class="tag">' + g.count + ' 个节点 · 住宅 ' + g.residential + ' · 机房 ' + g.datacenter + '</span>' +
       '</div>' +
       '<table><thead><tr><th>Host:Port</th><th class="hide-m">国码</th><th>协议</th><th>延迟</th><th class="hide-m">出口</th><th>类型</th><th class="hide-m">检测日期</th></tr></thead>' +
-      '<tbody>' + g.nodes.map(rowHtml).join("") + '</tbody></table>' +
+      '<tbody>' + g.nodes.map(function (n) { return rowHtml(n, protocol); }).join("") + '</tbody></table>' +
     '</div>';
   }).join("");
 }
 
 function render() {
-  renderCards(DATA);
-  renderCountries();
-  const s = DATA.stats || {};
-  document.getElementById("foot").textContent =
-    "数据时间 " + (DATA.generated_at || "?") + " · 来源 " + (DATA.source || "?") + " · 可用 " + (s.success || 0) + " / 检测 " + (s.checked || 0) + " · 点击 host:port 复制 sstp 链接";
+  if (DATA_SSTP) {
+    renderCards(DATA_SSTP, "sstp");
+    renderCountries("sstp", FILTER_SSTP);
+  }
+  if (DATA_SOCKS5) {
+    renderCards(DATA_SOCKS5, "socks5");
+    renderCountries("socks5", FILTER_SOCKS5);
+  }
+  updateFooter();
 }
 
-function setFilter(f) {
-  FILTER = f;
-  document.querySelectorAll(".pill").forEach(function (p) { p.classList.toggle("on", p.dataset.f === f); });
-  renderCountries();
+function updateFooter() {
+  let msg = "数据状态: ";
+  if (DATA_SSTP && DATA_SSTP.stats) {
+    msg += "SSTP " + (DATA_SSTP.stats.success || 0) + "/" + (DATA_SSTP.stats.checked || 0);
+  }
+  if (DATA_SOCKS5 && DATA_SOCKS5.stats) {
+    msg += (DATA_SSTP ? " | " : "") + "SOCKS5 " + (DATA_SOCKS5.stats.success || 0) + "/" + (DATA_SOCKS5.stats.checked || 0);
+  }
+  document.getElementById("foot").textContent = msg || "加载中…";
 }
-document.querySelectorAll(".pill").forEach(function (p) { p.addEventListener("click", function () { setFilter(p.dataset.f); }); });
 
-// 点击 host:port 复制 sstp://vpn:vpn@host:port
+function setFilter(proto, f) {
+  if (proto === "sstp") {
+    FILTER_SSTP = f;
+    document.querySelectorAll("[data-f^='sstp-']").forEach(function (p) { p.classList.toggle("on", p.dataset.f === f); });
+    renderCountries("sstp", f);
+  } else {
+    FILTER_SOCKS5 = f;
+    document.querySelectorAll("[data-f^='socks5-']").forEach(function (p) { p.classList.toggle("on", p.dataset.f === f); });
+    renderCountries("socks5", f);
+  }
+}
+
+// 标签页切换
+document.querySelectorAll(".tab").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    document.querySelectorAll(".tab").forEach(function (b) { b.classList.remove("on"); });
+    document.querySelectorAll(".tab-content").forEach(function (c) { c.classList.remove("on"); });
+    btn.classList.add("on");
+    document.getElementById("tab-" + btn.dataset.tab).classList.add("on");
+  });
+});
+
+// 筛选按钮
+document.querySelectorAll(".pill").forEach(function (p) {
+  p.addEventListener("click", function () {
+    const f = p.dataset.f;
+    if (f.startsWith("sstp-")) {
+      setFilter("sstp", f.substring(5));
+    } else if (f.startsWith("socks5-")) {
+      setFilter("socks5", f.substring(7));
+    }
+  });
+});
+
+// 点击 code 复制
 document.addEventListener("click", function (e) {
   const code = e.target.closest("code");
   if (!code) return;
-  const m = code.textContent.match(/(.+):(\d+)$/);
-  if (m) copyLink("sstp://vpn:vpn@" + m[1] + ":" + m[2]);
+  const link = code.dataset.copy || code.textContent;
+  if (link) copyLink(link);
 });
 
+// 加载数据
 async function load() {
   try {
-    const r = await fetch("data.json", { cache: "no-store" });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    DATA = await r.json();
-    render();
+    const r1 = await fetch("data.json", { cache: "no-store" });
+    if (r1.ok) DATA_SSTP = await r1.json();
   } catch (err) {
-    document.getElementById("foot").textContent = "data.json 加载失败: " + err + "（等待下一次 Action 生成）";
+    console.log("SSTP data.json 加载失败:", err);
   }
+  
+  try {
+    const r2 = await fetch("socks5_data.json", { cache: "no-store" });
+    if (r2.ok) DATA_SOCKS5 = await r2.json();
+  } catch (err) {
+    console.log("SOCKS5 socks5_data.json 加载失败:", err);
+  }
+  
+  render();
 }
+
 load();
 setInterval(load, 60000);
 </script>

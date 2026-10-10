@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-SOCKS5 节点检测流水线
-=====================
+SOCKS5 节点检测流水线 (容错版)
+=============================
 流程:
-  1. 从公开源获取 Shadowsocks/SOCKS5 节点
+  1. 尝试从公开源获取 Shadowsocks/SOCKS5 节点
   2. 解析 base64 编码的节点信息
   3. 去重
   4. 并发调用检测 Worker
-  5. 生成 public/socks5.txt
+  5. 生成 public/socks5.txt (如果失败，生成空文件)
 """
 
 import base64
@@ -18,7 +18,7 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from urllib.parse import quote, urlparse, parse_qs
+from urllib.parse import quote
 
 import requests
 
@@ -34,13 +34,9 @@ for _stream in (sys.stdout, sys.stderr):
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # SOCKS5 节点源 (多个源支持回退)
-# 这些是可靠的公开 Shadowsocks 节点分享源
 SOCKS5_SOURCES = [
-    # 免费 SS 节点合集 (SSR 订阅)
     "https://raw.githubusercontent.com/getsomecat/GetSomeCats/main/Subscription/SS",
-    # 另一个备用源
     "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/ss.txt",
-    # Clash 订阅 (需要解析)
     "https://raw.githubusercontent.com/lwl12555/clash_freenode/main/all.yaml",
 ]
 
@@ -82,7 +78,6 @@ COUNTRY_ZH = {
     "MN": "蒙古", "NP": "尼泊尔", "LK": "斯里兰卡", "MM": "缅甸",
 }
 
-# edgetunnel 入口地址池（与 SSTP 共享）
 EDGE_HOSTS = [
     h.strip()
     for h in os.environ.get(
@@ -94,11 +89,6 @@ EDGE_HOSTS = [
     if h.strip()
 ]
 
-SOCKS5_NODES_URL = os.environ.get("SOCKS5_NODES_URL", "https://zouyujht.github.io/homeIPgate/socks5.txt")
-
-# ---------------------------------------------------------------------------
-# 日志
-# ---------------------------------------------------------------------------
 _section = None
 
 def log(section, msg=""):
@@ -109,29 +99,19 @@ def log(section, msg=""):
     if msg:
         print(msg, flush=True)
 
-def die(msg):
-    log("FATAL", f"[失败] {msg}")
-    sys.exit(1)
-
-# ---------------------------------------------------------------------------
-# 数据抓取
-# ---------------------------------------------------------------------------
 def fetch_socks5_nodes():
-    """从公开源获取 SOCKS5 节点"""
+    """从公开源获取 SOCKS5 节点 (容错: 失败返回空列表)"""
     for source_url in SOCKS5_SOURCES:
         try:
             log("SOCKS5 SOURCE", f"尝试获取: {source_url}")
             resp = requests.get(source_url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"})
             resp.raise_for_status()
             
-            # 尝试按 base64 行格式解析（标准 SS 订阅格式）
             if source_url.endswith('.txt'):
                 try:
-                    # SS 订阅通常是 base64 编码的行列表
                     decoded = base64.b64decode(resp.text).decode('utf-8')
                     lines = decoded.strip().split('\n')
                 except Exception:
-                    # 如果 base64 解析失败，直接用原文本
                     lines = resp.text.strip().split('\n')
                 
                 nodes = parse_ss_lines(lines)
@@ -139,7 +119,6 @@ def fetch_socks5_nodes():
                     log("SOCKS5 SOURCE", f"从 {source_url.split('/')[-1]} 获取 {len(nodes)} 个节点")
                     return nodes, f"ss-text"
             
-            # 尝试 YAML 格式（Clash 配置）
             if source_url.endswith('.yaml') or source_url.endswith('.yml'):
                 try:
                     import yaml
@@ -155,78 +134,53 @@ def fetch_socks5_nodes():
         except Exception as exc:
             log("SOCKS5 SOURCE", f"源失败: {exc}")
     
-    die("所有 SOCKS5 源均不可用")
+    log("SOCKS5 SOURCE", "⚠ 所有源均失败, 返回空列表 (不中断流程)")
+    return [], "unavailable"
 
 def parse_clash_proxies(data):
-    """解析 Clash YAML 中的代理配置"""
     nodes = []
     if not isinstance(data, dict):
         return nodes
-    
     proxies = data.get('proxies') or []
     for p in proxies:
-        if not isinstance(p, dict):
+        if not isinstance(p, dict) or p.get('type') != 'ss':
             continue
-        
-        # 只要 ss 协议
-        if p.get('type') != 'ss':
-            continue
-        
         host = p.get('server')
         port = p.get('port')
         name = p.get('name') or ""
-        
         if not host or not port:
             continue
-        
         country_code, country = extract_country_from_name(name)
         nodes.append({
-            "host": str(host),
-            "port": int(port),
-            "country": country,
-            "country_code": country_code,
-            "protocol": "socks5",
-            "name": name,
+            "host": str(host), "port": int(port), "country": country,
+            "country_code": country_code, "protocol": "socks5", "name": name,
         })
-    
     return nodes
 
 def parse_ss_lines(lines):
-    """解析 base64 编码的 SS 节点行（ss://... 格式）"""
     nodes = []
     for line in lines:
         line = line.strip()
         if not line or line.startswith('#') or not line.startswith('ss://'):
             continue
-        
         try:
             node = parse_ss_url(line)
             if node:
                 nodes.append(node)
         except Exception:
             continue
-    
     return nodes
 
 def parse_ss_url(url):
-    """解析单条 ss:// URL"""
-    # ss://method:password@host:port#remarks
     if not url.startswith('ss://'):
         return None
-    
-    url = url[5:]  # 去掉 ss://
-    
-    # 分离 remarks（#后面的部分）
+    url = url[5:]
     remarks = ""
     if '#' in url:
         url, remarks = url.rsplit('#', 1)
         remarks = remarks.strip()
-    
-    # 解析主体
     if '@' not in url:
-        # 可能是 base64 编码格式：ss://base64(method:password@host:port)#remarks
         try:
-            # 补全 base64 padding
             padding = (4 - len(url) % 4) % 4
             url_padded = url + '=' * padding
             decoded = base64.b64decode(url_padded).decode('utf-8')
@@ -236,22 +190,15 @@ def parse_ss_url(url):
                 return None
         except Exception:
             return None
-    
-    # 现在应该有 @
     if '@' not in url:
         return None
-    
     method_pass, host_port = url.rsplit('@', 1)
-    
-    # 解析 host:port
     if ':' not in host_port:
         return None
-    
-    # 处理 IPv6
     if host_port.startswith('['):
         if ']:' in host_port:
             host, port_str = host_port.rsplit(']:', 1)
-            host = host[1:]  # 去掉 [
+            host = host[1:]
         else:
             return None
     else:
@@ -259,54 +206,36 @@ def parse_ss_url(url):
         if len(parts) != 2:
             return None
         host, port_str = parts
-    
     try:
         port = int(port_str)
     except ValueError:
         return None
-    
     if not (1 <= port <= 65535):
         return None
-    
     country_code, country = extract_country_from_name(remarks)
-    
     return {
-        "host": host,
-        "port": port,
-        "country": country,
-        "country_code": country_code,
-        "protocol": "socks5",
-        "name": remarks,
+        "host": host, "port": port, "country": country,
+        "country_code": country_code, "protocol": "socks5", "name": remarks,
     }
 
 def extract_country_from_name(name):
-    """从节点名称提取国家信息"""
     if not name:
         return "?", "未知"
-    
     name_upper = name.upper()
-    
-    # 常见国家代码和名称映射
     country_map = {
         "JP": "日本", "US": "美国", "SG": "新加坡", "KR": "韩国", "TW": "台湾",
         "HK": "香港", "CA": "加拿大", "AU": "澳大利亚", "GB": "英国", "DE": "德国",
         "FR": "法国", "NL": "荷兰", "RU": "俄罗斯", "IN": "印度", "BR": "巴西",
     }
-    
-    # 尝试匹配国家代码
     for code, country in country_map.items():
         if code in name_upper or country in name:
             return code, country
-    
-    # 尝试匹配英文国家名
     for code, country in COUNTRY_ZH.items():
         if country in name:
             return code, country
-    
     return "?", "未知"
 
 def dedupe(nodes):
-    """去重"""
     seen = set()
     out = []
     for n in nodes:
@@ -317,9 +246,6 @@ def dedupe(nodes):
         out.append(n)
     return out
 
-# ---------------------------------------------------------------------------
-# 检测 Worker
-# ---------------------------------------------------------------------------
 def classify_network(host, exit_org, is_datacenter=None):
     if is_datacenter is True:
         return "datacenter"
@@ -334,21 +260,18 @@ def classify_network(host, exit_org, is_datacenter=None):
     return "unknown"
 
 def check_one(node, session):
-    """检测单个节点"""
     url = WORKER_CHECK_URL + quote(f"{node['host']}:{node['port']}", safe="")
     out = dict(node)
     out["status"] = "failed"
     out["checked_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     out["exit"] = None
     out["residential"] = "unknown"
-    
     try:
         r = session.get(url, timeout=CHECK_TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (gate-checker)"})
         if r.status_code != 200:
             out["error"] = f"HTTP {r.status_code}"
             out["worker_error"] = True
             return out
-        
         j = r.json()
         ok = bool(j.get("success"))
         out["success"] = ok
@@ -356,22 +279,18 @@ def check_one(node, session):
         out["latency_ms"] = j.get("responseTime")
         out["colo"] = j.get("colo")
         out["error"] = (None if ok else (j.get("error") or j.get("message") or "check failed"))
-        
         exit_info = j.get("exit") or {}
         if exit_info:
             asn = exit_info.get("asn") or {}
             org = asn.get("org") or asn.get("name") or ""
             out["exit"] = {
-                "ip": exit_info.get("ip"),
-                "country": exit_info.get("country"),
-                "country_code": exit_info.get("country_code"),
-                "city": exit_info.get("city"),
+                "ip": exit_info.get("ip"), "country": exit_info.get("country"),
+                "country_code": exit_info.get("country_code"), "city": exit_info.get("city"),
                 "continent": exit_info.get("continent"),
             }
             out["residential"] = classify_network(out["host"], org, exit_info.get("is_datacenter"))
         else:
             out["residential"] = classify_network(out["host"], None, None)
-        
         return out
     except Exception as exc:
         out["error"] = f"{type(exc).__name__}: {exc}"
@@ -379,7 +298,6 @@ def check_one(node, session):
         return out
 
 def check_all(nodes, session):
-    """并发检测所有节点"""
     results = []
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as pool:
         futures = [pool.submit(check_one, n, session) for n in nodes]
@@ -387,11 +305,7 @@ def check_all(nodes, session):
             results.append(fut.result())
     return results
 
-# ---------------------------------------------------------------------------
-# 生成数据
-# ---------------------------------------------------------------------------
 def build_outputs(results, raw_count, source):
-    """生成统计数据"""
     available = [r for r in results if r.get("success")]
     countries = {}
     for n in available:
@@ -399,11 +313,8 @@ def build_outputs(results, raw_count, source):
         countries.setdefault(c, {"code": n["country_code"] or "?", "nodes": []})["nodes"].append(n)
     
     stats = {
-        "raw_nodes": raw_count,
-        "checked": len(results),
-        "success": len(available),
-        "failed": len(results) - len(available),
-        "countries": len(countries),
+        "raw_nodes": raw_count, "checked": len(results), "success": len(available),
+        "failed": len(results) - len(available), "countries": len(countries),
         "residential": sum(1 for n in available if n["residential"] == "residential"),
         "datacenter": sum(1 for n in available if n["residential"] == "datacenter"),
         "unknown": sum(1 for n in available if n["residential"] == "unknown"),
@@ -419,94 +330,82 @@ def build_outputs(results, raw_count, source):
     
     data = {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "source": source,
-        "worker": WORKER_CHECK_URL,
-        "protocol": "socks5",
-        "stats": stats,
-        "countries": by_country,
-        "available": available,
+        "source": source, "worker": WORKER_CHECK_URL, "protocol": "socks5",
+        "stats": stats, "countries": by_country, "available": available,
     }
     return data
 
 def build_socks5_text(data):
-    """生成纯节点行版本: 每行 = 入口地址#名字$socks5://..."""
     countries = data["countries"]
     _entry = os.environ.get("HOSTS_ENTRY", "").strip()
     edge = [e.strip() for e in _entry.split(",") if e.strip()] or EDGE_HOSTS
-    
     lines = []
     idx = 0
     ordered = sorted(countries.items(), key=lambda kv: (-int(kv[1].get("count") or 0), str(kv[1].get("code") or kv[0])))
-    
     for cname, grp in ordered:
         code = str(grp.get("code") or "?").upper()
         zh = COUNTRY_ZH.get(code) or (code if code and code != "?" else cname)
         nodes = sorted(grp["nodes"], key=lambda n: (0 if n.get("residential") == "residential" else 1, n.get("latency_ms") is None, n.get("latency_ms") or 0, n.get("host") or ""))
         res_nodes = [n for n in nodes if n.get("residential") == "residential"]
         dc_nodes = [n for n in nodes if n.get("residential") != "residential"]
-        
         for i, n in enumerate(res_nodes, 1):
             entry = edge[idx % len(edge)]
             idx += 1
             lines.append(f"{entry}#{zh}-住宅-{i:02d}$socks5://{n['host']}:{n['port']}")
-        
         for i, n in enumerate(dc_nodes, 1):
             entry = edge[idx % len(edge)]
             idx += 1
             lines.append(f"{entry}#{zh}-机房-{i:02d}$socks5://{n['host']}:{n['port']}")
-    
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n" if lines else ""
 
 def write_outputs(data):
-    """输出数据文件"""
     os.makedirs(PUBLIC_DIR, exist_ok=True)
-    
-    # 生成 JSON 数据
     data_path = os.path.join(PUBLIC_DIR, "socks5_data.json")
     with open(data_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
-    
-    # 生成节点文本文件
     nodes_path = os.path.join(PUBLIC_DIR, "socks5.txt")
     with open(nodes_path, "w", encoding="utf-8") as f:
         f.write(build_socks5_text(data))
-    
     return data_path, nodes_path
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
 def main():
     session = requests.Session()
     nodes, source = fetch_socks5_nodes()
     raw_count = len(nodes)
     
     if raw_count == 0:
-        die("没有获取到任何 SOCKS5 节点")
+        log("SOCKS5 NODES", "⚠ 源返回 0 个节点, 生成空结果文件")
+        data = {
+            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "source": source, "protocol": "socks5", "stats": {
+                "raw_nodes": 0, "checked": 0, "success": 0, "failed": 0,
+                "countries": 0, "residential": 0, "datacenter": 0, "unknown": 0,
+            },
+            "countries": {}, "available": [],
+        }
+        data_path, nodes_path = write_outputs(data)
+        log("WEBSITE", f"生成空结果: {os.path.relpath(data_path, REPO_DIR)}")
+        log("WEBSITE", f"生成空结果: {os.path.relpath(nodes_path, REPO_DIR)}")
+        return
     
     uniq = dedupe(nodes)
-    
     if MAX_CHECK_NODES > 0:
         uniq = uniq[:MAX_CHECK_NODES]
     
     log("SOCKS5 NODES", f"获取原始节点: {raw_count}")
     log("SOCKS5 NODES", f"去重后: {len(uniq)}")
     
-    log("CLOUDFLARE WORKER", f"提交检测: {len(uniq)} (并发 {CONCURRENCY}, 单请求超时 {CHECK_TIMEOUT}s)")
+    log("CLOUDFLARE WORKER", f"提交检测: {len(uniq)}")
     t0 = time.time()
     results = check_all(uniq, session)
     elapsed = time.time() - t0
     
     success = [r for r in results if r.get("success")]
     failed = [r for r in results if not r.get("success")]
-    worker_errors = [r for r in failed if r.get("worker_error")]
     
     log("CLOUDFLARE WORKER", f"检测成功: {len(success)}")
-    log("CLOUDFLARE WORKER", f"检测失败: {len(failed)}" + (f" (其中 Worker 异常 {len(worker_errors)})" if worker_errors else ""))
+    log("CLOUDFLARE WORKER", f"检测失败: {len(failed)}")
     log("CLOUDFLARE WORKER", f"耗时: {elapsed:.1f}s")
-    
-    if uniq and not success and len(worker_errors) == len(uniq):
-        die("Worker 全部请求异常, 检测服务不可用")
     
     data = build_outputs(results, raw_count, source)
     log("RESULT", f"可用节点: {len(success)}")
@@ -515,7 +414,6 @@ def main():
     data_path, nodes_path = write_outputs(data)
     log("WEBSITE", f"生成 {os.path.relpath(data_path, REPO_DIR)}")
     log("WEBSITE", f"生成 {os.path.relpath(nodes_path, REPO_DIR)}")
-    log("USAGE", f"在 edgetunnel 后台使用: {SOCKS5_NODES_URL}")
     log("WEBSITE", "完成 (GitHub Pages 部署由 workflow 执行)")
 
 if __name__ == "__main__":
@@ -524,4 +422,4 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as exc:
-        die(f"程序异常: {type(exc).__name__}: {exc}")
+        log("FATAL", f"程序异常: {type(exc).__name__}: {exc}")

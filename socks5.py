@@ -3,7 +3,7 @@
 SOCKS5 节点检测流水线
 =====================
 流程:
-  1. 从 v2rayse API 获取 Shadowsocks 节点
+  1. 从公开源获取 Shadowsocks/SOCKS5 节点
   2. 解析 base64 编码的节点信息
   3. 去重
   4. 并发调用检测 Worker
@@ -34,9 +34,14 @@ for _stream in (sys.stdout, sys.stderr):
 REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # SOCKS5 节点源 (多个源支持回退)
+# 这些是可靠的公开 Shadowsocks 节点分享源
 SOCKS5_SOURCES = [
-    "https://raw.githubusercontent.com/v2rayse/v2rayseApi/master/v2rayse.json",
-    "https://raw.githubusercontent.com/ssrsub/ssr/master/ss-sub.txt",
+    # 免费 SS 节点合集 (SSR 订阅)
+    "https://raw.githubusercontent.com/getsomecat/GetSomeCats/main/Subscription/SS",
+    # 另一个备用源
+    "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/ss.txt",
+    # Clash 订阅 (需要解析)
+    "https://raw.githubusercontent.com/lwl12555/clash_freenode/main/all.yaml",
 ]
 
 WORKER_CHECK_URL = os.environ.get("CHECK_WORKER", "https://check5.zouyu.dpdns.org/check?socks5=")
@@ -112,57 +117,69 @@ def die(msg):
 # 数据抓取
 # ---------------------------------------------------------------------------
 def fetch_socks5_nodes():
-    """从 v2rayse 等源获取 SOCKS5 节点"""
+    """从公开源获取 SOCKS5 节点"""
     for source_url in SOCKS5_SOURCES:
         try:
             log("SOCKS5 SOURCE", f"尝试获取: {source_url}")
             resp = requests.get(source_url, timeout=HTTP_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"})
             resp.raise_for_status()
             
-            # 尝试按 JSON 解析（v2rayse API）
-            if source_url.endswith('.json'):
+            # 尝试按 base64 行格式解析（标准 SS 订阅格式）
+            if source_url.endswith('.txt'):
                 try:
-                    data = resp.json()
-                    nodes = parse_v2rayse_json(data)
-                    if nodes:
-                        log("SOCKS5 SOURCE", f"从 v2rayse JSON 获取 {len(nodes)} 个节点")
-                        return nodes, "v2rayse-json"
-                except (json.JSONDecodeError, ValueError):
-                    pass
+                    # SS 订阅通常是 base64 编码的行列表
+                    decoded = base64.b64decode(resp.text).decode('utf-8')
+                    lines = decoded.strip().split('\n')
+                except Exception:
+                    # 如果 base64 解析失败，直接用原文本
+                    lines = resp.text.strip().split('\n')
+                
+                nodes = parse_ss_lines(lines)
+                if nodes:
+                    log("SOCKS5 SOURCE", f"从 {source_url.split('/')[-1]} 获取 {len(nodes)} 个节点")
+                    return nodes, f"ss-text"
             
-            # 尝试按 base64 行格式解析
-            lines = resp.text.strip().split('\n')
-            nodes = parse_ss_lines(lines)
-            if nodes:
-                log("SOCKS5 SOURCE", f"从 {source_url.split('/')[-1]} 获取 {len(nodes)} 个节点")
-                return nodes, f"ss-lines"
+            # 尝试 YAML 格式（Clash 配置）
+            if source_url.endswith('.yaml') or source_url.endswith('.yml'):
+                try:
+                    import yaml
+                    data = yaml.safe_load(resp.text)
+                    nodes = parse_clash_proxies(data)
+                    if nodes:
+                        log("SOCKS5 SOURCE", f"从 Clash YAML 获取 {len(nodes)} 个节点")
+                        return nodes, "clash-yaml"
+                except Exception as e:
+                    log("SOCKS5 SOURCE", f"YAML 解析失败: {e}")
+                    continue
+        
         except Exception as exc:
             log("SOCKS5 SOURCE", f"源失败: {exc}")
     
     die("所有 SOCKS5 源均不可用")
 
-def parse_v2rayse_json(data):
-    """解析 v2rayse JSON 格式"""
+def parse_clash_proxies(data):
+    """解析 Clash YAML 中的代理配置"""
     nodes = []
     if not isinstance(data, dict):
         return nodes
     
-    # v2rayse 返回的结构: {"configVersion": 2, "proxies": [...]}
-    proxies = data.get("proxies") or []
+    proxies = data.get('proxies') or []
     for p in proxies:
-        if p.get("type") != "ss":  # 只要 Shadowsocks
+        if not isinstance(p, dict):
             continue
         
-        host = p.get("server") or p.get("host")
-        port = p.get("port")
-        name = p.get("name") or ""
+        # 只要 ss 协议
+        if p.get('type') != 'ss':
+            continue
+        
+        host = p.get('server')
+        port = p.get('port')
+        name = p.get('name') or ""
         
         if not host or not port:
             continue
         
-        # 尝试从名称中提取国家信息
         country_code, country = extract_country_from_name(name)
-        
         nodes.append({
             "host": str(host),
             "port": int(port),
